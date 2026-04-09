@@ -108,18 +108,8 @@ function setupSocketEvents() {
     });
 
     socket.on('offer', async (data) => {
-        // issue 3: wait for localStream to be ready before answering
-        if (!localStream) {
-            await new Promise(resolve => {
-                const check = setInterval(() => { if (localStream) { clearInterval(check); resolve(); } }, 100);
-            });
-        }
         if (!peerConnection) createPeerConnection();
         await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
-        localStream.getTracks().forEach(track => {
-            const alreadyAdded = peerConnection.getSenders().find(s => s.track === track);
-            if (!alreadyAdded) peerConnection.addTrack(track, localStream);
-        });
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
         socket.emit('answer', { answer, room_id: roomId });
@@ -133,6 +123,11 @@ function setupSocketEvents() {
     });
 
     socket.on('video_frame', (data) => {
+        if (!isRemoteVideoConnected) {
+            remoteVideo.style.backgroundImage = `url(${data.frame})`;
+            remoteVideo.style.backgroundSize = 'cover';
+            remoteVideo.style.backgroundPosition = 'center';
+        }
         updateSignText(remoteSignText, data.detected_sign);
         if (data.detected_sign) addToHistory(data.detected_sign, data.confidence, 'remote');
     });
@@ -270,11 +265,10 @@ function createPeerConnection() {
         }
     };
 
+    // FIX 3: ontrack receives remote audio+video stream
     peerConnection.ontrack = (e) => {
-        if (e.streams && e.streams[0]) {
+        if (remoteVideo.srcObject !== e.streams[0]) {
             remoteVideo.srcObject = e.streams[0];
-            remoteVideo.muted = false;
-            remoteVideo.play().catch(() => {});
             isRemoteVideoConnected = true;
             remoteVideo.style.backgroundImage = '';
         }
@@ -294,17 +288,18 @@ async function createAndSendOffer() {
 function startSendingVideoFrames() {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
-    // issue 4: small frame size, low quality, slow interval — sign detection only, not video stream
-    canvas.width = 256;
-    canvas.height = 192;
-    let sending = false;
+    // FIX 2: reduce frame size from 640x480 to 320x240 to reduce lag
+    canvas.width = 320;
+    canvas.height = 240;
+
+    // FIX 2: send every 500ms instead of 200ms — only for sign detection, not video
     frameInterval = setInterval(() => {
-        // issue 4: skip frame if previous one is still being processed
-        if (sending || !localStream || !isCameraOn || localVideo.videoWidth === 0) return;
-        sending = true;
-        ctx.drawImage(localVideo, 0, 0, canvas.width, canvas.height);
-        socket.emit('video_frame', { frame: canvas.toDataURL('image/jpeg', 0.4) }, () => { sending = false; });
-    }, 800);
+        if (localStream && isCameraOn && localVideo.videoWidth > 0) {
+            ctx.drawImage(localVideo, 0, 0, canvas.width, canvas.height);
+            // FIX 2: lower jpeg quality to 0.5 to reduce payload size
+            socket.emit('video_frame', { frame: canvas.toDataURL('image/jpeg', 0.5) });
+        }
+    }, 500);
 }
 
 // ── Chat ──────────────────────────────────────────────
@@ -367,14 +362,8 @@ function setupSpeechRecognition() {
         recognition.interimResults = false;
         recognition.lang = 'en-US';
         recognition.onresult = (e) => { speechText.value = e.results[0][0].transcript; };
-        recognition.onerror = () => {
-            startSpeechBtn.disabled = false;
-            startSpeechBtn.innerHTML = '<i class="fas fa-microphone"></i> Speak';
-        };
-        recognition.onend = () => {
-            startSpeechBtn.disabled = false;
-            startSpeechBtn.innerHTML = '<i class="fas fa-microphone"></i> Speak';
-        };
+        recognition.onerror = () => { startSpeechBtn.disabled = false; };
+        recognition.onend = () => { startSpeechBtn.disabled = false; };
     } else {
         startSpeechBtn.style.display = 'none';
     }
@@ -384,8 +373,6 @@ function startSpeechRecognition() {
     if (recognition) {
         speechText.value = '';
         startSpeechBtn.disabled = true;
-        // issue 5: show recording indicator
-        startSpeechBtn.innerHTML = '<i class="fas fa-circle" style="color:#e74c3c;animation:pulse 1s infinite"></i> Listening...';
         recognition.start();
     }
 }
