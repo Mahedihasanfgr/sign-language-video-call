@@ -273,10 +273,11 @@ function createPeerConnection() {
         }
     };
 
-    // FIX 3: ontrack receives remote audio+video stream
+    // always assign remote stream so both audio and video tracks are captured
     peerConnection.ontrack = (e) => {
-        if (remoteVideo.srcObject !== e.streams[0]) {
+        if (e.streams && e.streams[0]) {
             remoteVideo.srcObject = e.streams[0];
+            remoteVideo.muted = false;
             isRemoteVideoConnected = true;
             remoteVideo.style.backgroundImage = '';
         }
