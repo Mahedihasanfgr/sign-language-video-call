@@ -275,11 +275,11 @@ function createPeerConnection() {
         }
     };
 
-    // always assign remote stream so both audio and video tracks are captured
     peerConnection.ontrack = (e) => {
         if (e.streams && e.streams[0]) {
             remoteVideo.srcObject = e.streams[0];
             remoteVideo.muted = false;
+            remoteVideo.play().catch(() => {});
             isRemoteVideoConnected = true;
             remoteVideo.style.backgroundImage = '';
         }
