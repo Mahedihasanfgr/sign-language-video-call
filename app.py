@@ -197,7 +197,9 @@ def handle_chat_message(data):
     room_id = connected_users.get(request.sid, {}).get('room')
     if not room_id:
         return
-    emit('chat_message', {'message': data['message'], 'time': data.get('time', '')}, room=room_id, skip_sid=request.sid)
+    for user_sid in active_rooms.get(room_id, []):
+        if user_sid != request.sid:
+            emit('chat_message', {'message': data['message'], 'time': data.get('time', '')}, to=user_sid)
 
 @socketio.on('speech_to_sign')
 def handle_speech_to_sign(data):
