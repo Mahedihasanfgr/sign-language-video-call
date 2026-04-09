@@ -110,6 +110,14 @@ function setupSocketEvents() {
     socket.on('offer', async (data) => {
         if (!peerConnection) createPeerConnection();
         await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+        // add local tracks before creating answer so joiner's audio is included
+        if (localStream) {
+            localStream.getTracks().forEach(track => {
+                const senders = peerConnection.getSenders();
+                const alreadyAdded = senders.find(s => s.track === track);
+                if (!alreadyAdded) peerConnection.addTrack(track, localStream);
+            });
+        }
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
         socket.emit('answer', { answer, room_id: roomId });
