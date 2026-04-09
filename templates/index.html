@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign Language Video Call</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+</head>
+<body>
+
+    <!-- Toast Notifications -->
+    <div id="toast-container"></div>
+
+    <div class="container">
+        <header>
+            <h1><i class="fas fa-hands"></i> Sign Language Video Call</h1>
+            <p>Connect through sign language and speech conversion</p>
+        </header>
+
+        <!-- Join Screen -->
+        <div id="join-container">
+            <div class="room-options">
+                <div class="option-box">
+                    <div class="option-icon"><i class="fas fa-plus-circle"></i></div>
+                    <h2>Create a Room</h2>
+                    <p>Start a new video call room and share the ID</p>
+                    <button id="create-room-btn" class="btn primary-btn">Create Room</button>
+                </div>
+                <div class="option-box">
+                    <div class="option-icon"><i class="fas fa-sign-in-alt"></i></div>
+                    <h2>Join a Room</h2>
+                    <p>Enter a room ID to join an existing room</p>
+                    <input type="text" id="room-id-input" placeholder="Enter Room ID">
+                    <button id="join-room-btn" class="btn primary-btn">Join Room</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Call Screen -->
+        <div id="call-container" class="hidden">
+
+            <!-- Room Info Bar -->
+            <div class="room-info">
+                <div class="room-id-section">
+                    <span class="room-label">Room ID:</span>
+                    <span id="room-id-display" class="room-id-value"></span>
+                    <button id="copy-room-btn" class="btn icon-btn" title="Copy Room ID">
+                        <i class="fas fa-copy"></i>
+                    </button>
+                </div>
+                <div class="controls">
+                    <button id="toggle-video-btn" class="btn control-btn active" title="Toggle Camera">
+                        <i class="fas fa-video"></i>
+                    </button>
+                    <button id="toggle-mic-btn" class="btn control-btn active" title="Toggle Mic">
+                        <i class="fas fa-microphone"></i>
+                    </button>
+                    <button id="leave-btn" class="btn danger-btn">
+                        <i class="fas fa-phone-slash"></i> Leave
+                    </button>
+                </div>
+            </div>
+
+            <!-- Main Content -->
+            <div class="main-content">
+
+                <!-- Left: Videos + Speech -->
+                <div class="left-panel">
+                    <div class="video-area">
+                        <div class="video-wrapper">
+                            <div class="video-container">
+                                <video id="local-video" autoplay muted playsinline></video>
+                                <div class="video-label"><i class="fas fa-user"></i> You</div>
+                                <div id="local-sign-text" class="sign-text hidden"></div>
+                            </div>
+                        </div>
+                        <div class="video-wrapper">
+                            <div class="video-container">
+                                <video id="remote-video" autoplay playsinline></video>
+                                <div class="video-label"><i class="fas fa-user-friends"></i> Remote User</div>
+                                <div id="remote-sign-text" class="sign-text hidden"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Speech to Sign -->
+                    <div class="speech-to-sign-container">
+                        <h3><i class="fas fa-language"></i> Speech to Sign Conversion</h3>
+                        <div class="speech-controls">
+                            <button id="start-speech-btn" class="btn primary-btn">
+                                <i class="fas fa-microphone"></i> Speak
+                            </button>
+                            <input type="text" id="speech-text" placeholder="Speak or type here...">
+                            <button id="convert-btn" class="btn secondary-btn">
+                                <i class="fas fa-exchange-alt"></i> Convert
+                            </button>
+                        </div>
+                        <div id="sign-images-container" class="sign-images"></div>
+                    </div>
+                </div>
+
+                <!-- Right: Chat + Sign History -->
+                <div class="right-panel">
+
+                    <!-- Chat Box -->
+                    <div class="panel-box chat-panel">
+                        <div class="panel-header">
+                            <i class="fas fa-comments"></i> Chat
+                            <span id="unread-badge" class="badge hidden">0</span>
+                        </div>
+                        <div id="chat-messages" class="chat-messages"></div>
+                        <div class="chat-input-area">
+                            <input type="text" id="chat-input" placeholder="Type a message..." maxlength="300">
+                            <button id="send-chat-btn" class="btn icon-btn">
+                                <i class="fas fa-paper-plane"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Sign Detection History -->
+                    <div class="panel-box history-panel">
+                        <div class="panel-header">
+                            <i class="fas fa-history"></i> Sign Detection History
+                            <button id="clear-history-btn" class="btn icon-btn small" title="Clear History">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                        <div id="sign-history" class="sign-history">
+                            <p class="empty-state">No signs detected yet...</p>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+
+        <!-- Connection Status Overlay -->
+        <div id="connection-status" class="status-overlay hidden">
+            <div class="status-box">
+                <div class="spinner"></div>
+                <p>Connecting to room...</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.4.1/socket.io.min.js"></script>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

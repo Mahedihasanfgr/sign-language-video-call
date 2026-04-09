@@ -49,7 +49,7 @@ mp_drawing = mp.solutions.drawing_utils
 hands = mp_hands.Hands(
     static_image_mode=False,
     max_num_hands=2,
-    min_detection_confidence=0.5,  # Lowered threshold for better detection
+    min_detection_confidence=0.5,
     min_tracking_confidence=0.5
 )
 
@@ -60,7 +60,7 @@ def index():
 
 @app.route('/image/<filename>')
 def serve_image(filename):
-    return send_from_directory(os.path.join('backend', 'image'), filename)
+    return send_from_directory(os.path.join('backend', 'images'), filename)
 
 # WebSocket event handlers
 @socketio.on('connect')
@@ -166,7 +166,7 @@ def handle_video_frame(data):
         frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
         
         # Process with MediaPipe
-        results, detected_sign = process_frame_for_detection(frame)
+        results, detected_sign, confidence = process_frame_for_detection(frame)
         
         # Encode the processed frame with landmarks
         processed_frame = visualize_landmarks(frame, results, detected_sign)
@@ -174,7 +174,7 @@ def handle_video_frame(data):
         processed_frame_data = base64.b64encode(buffer).decode('utf-8')
         
         # Send the detected sign back to the sender
-        emit('sign_detected', {'sign': detected_sign}, room=request.sid)
+        emit('sign_detected', {'sign': detected_sign, 'confidence': confidence}, room=request.sid)
         
         # Send the processed frame and detected sign to the other users in the room
         for user_sid in active_rooms[room_id]:
@@ -182,10 +182,20 @@ def handle_video_frame(data):
                 emit('video_frame', {
                     'frame': f"data:image/jpeg;base64,{processed_frame_data}",
                     'sender': request.sid,
-                    'detected_sign': detected_sign
+                    'detected_sign': detected_sign,
+                    'confidence': confidence
                 }, room=user_sid)
     except Exception as e:
         logger.error(f"Error processing video frame: {e}")
+
+@socketio.on('chat_message')
+def handle_chat_message(data):
+    room_id = connected_users.get(request.sid, {}).get('room')
+    if not room_id:
+        return
+    for user_sid in active_rooms.get(room_id, []):
+        if user_sid != request.sid:
+            emit('chat_message', {'message': data['message'], 'time': data.get('time', '')}, room=user_sid)
 
 @socketio.on('speech_to_sign')
 def handle_speech_to_sign(data):
@@ -325,7 +335,7 @@ def extract_features(landmarks, img_width, img_height):
 
 def process_frame_for_detection(frame):
     if model is None:
-        return None, "Model not loaded"
+        return None, "Model not loaded", None
     
     # Convert to RGB (MediaPipe requires RGB input)
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -334,6 +344,7 @@ def process_frame_for_detection(frame):
     results = hands.process(rgb_frame)
     
     detected_sign = None
+    confidence = None
     if results.multi_hand_landmarks and results.multi_handedness:
         img_height, img_width, _ = frame.shape
         
@@ -375,6 +386,7 @@ def process_frame_for_detection(frame):
         else:
             combined_features.extend([0] * 34)  # 34 features per hand
         
+        confidence = None
         try:
             # Reshape features to match the model's expected input
             features_array = np.array(combined_features).reshape(1, -1)
@@ -383,12 +395,16 @@ def process_frame_for_detection(frame):
             prediction = model.predict(features_array)
             detected_sign = prediction[0] if isinstance(prediction, (list, np.ndarray)) else prediction
             logger.info(f"Detected sign: {detected_sign}")
+
+            if hasattr(model, 'predict_proba'):
+                proba = model.predict_proba(features_array)
+                confidence = float(np.max(proba))
         except Exception as e:
             logger.error(f"Prediction error: {e}")
             logger.error(f"Features shape: {np.array(combined_features).shape}")
             logger.error(f"Model type: {type(model)}")
     
-    return results, detected_sign
+    return results, detected_sign, confidence
 
 def visualize_landmarks(frame, results, detected_sign=None):
     frame_out = frame.copy()
@@ -398,7 +414,7 @@ def get_sign_images(text):
     """Get sign language images for the given text"""
     image_paths = []
     word_info = []  # To track which images belong to which words
-    image_dir = os.path.join('backend', 'image')
+    image_dir = os.path.join('backend', 'images')
     
     # Check for whole phrases first
     if os.path.exists(os.path.join(image_dir, f"{text.lower()}.png")):
@@ -437,4 +453,5 @@ def get_sign_images(text):
     return image_paths, word_info
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True, host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    socketio.run(app, debug=False, host='0.0.0.0', port=port)

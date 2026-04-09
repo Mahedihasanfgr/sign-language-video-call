@@ -1,24 +1,31 @@
 // DOM Elements
-const joinContainer = document.getElementById('join-container');
-const callContainer = document.getElementById('call-container');
-const connectionStatus = document.getElementById('connection-status');
-const roomIdDisplay = document.getElementById('room-id-display');
-const roomIdInput = document.getElementById('room-id-input');
-const createRoomBtn = document.getElementById('create-room-btn');
-const joinRoomBtn = document.getElementById('join-room-btn');
-const toggleVideoBtn = document.getElementById('toggle-video-btn');
-const toggleMicBtn = document.getElementById('toggle-mic-btn');
-const leaveBtn = document.getElementById('leave-btn');
-const localVideo = document.getElementById('local-video');
-const remoteVideo = document.getElementById('remote-video');
-const localSignText = document.getElementById('local-sign-text');
-const remoteSignText = document.getElementById('remote-sign-text');
-const startSpeechBtn = document.getElementById('start-speech-btn');
-const speechText = document.getElementById('speech-text');
-const convertBtn = document.getElementById('convert-btn');
+const joinContainer       = document.getElementById('join-container');
+const callContainer       = document.getElementById('call-container');
+const connectionStatus    = document.getElementById('connection-status');
+const roomIdDisplay       = document.getElementById('room-id-display');
+const roomIdInput         = document.getElementById('room-id-input');
+const createRoomBtn       = document.getElementById('create-room-btn');
+const joinRoomBtn         = document.getElementById('join-room-btn');
+const copyRoomBtn         = document.getElementById('copy-room-btn');
+const toggleVideoBtn      = document.getElementById('toggle-video-btn');
+const toggleMicBtn        = document.getElementById('toggle-mic-btn');
+const leaveBtn            = document.getElementById('leave-btn');
+const localVideo          = document.getElementById('local-video');
+const remoteVideo         = document.getElementById('remote-video');
+const localSignText       = document.getElementById('local-sign-text');
+const remoteSignText      = document.getElementById('remote-sign-text');
+const startSpeechBtn      = document.getElementById('start-speech-btn');
+const speechText          = document.getElementById('speech-text');
+const convertBtn          = document.getElementById('convert-btn');
 const signImagesContainer = document.getElementById('sign-images-container');
+const chatInput           = document.getElementById('chat-input');
+const sendChatBtn         = document.getElementById('send-chat-btn');
+const chatMessages        = document.getElementById('chat-messages');
+const signHistory         = document.getElementById('sign-history');
+const clearHistoryBtn     = document.getElementById('clear-history-btn');
+const unreadBadge         = document.getElementById('unread-badge');
 
-// WebRTC configuration
+// WebRTC config
 const servers = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -26,419 +33,334 @@ const servers = {
     ]
 };
 
-// Global variables
-let socket;
-let localStream;
-let peerConnection;
-let roomId;
-let isCameraOn = true;
-let isMicOn = true;
-let isConnected = false;
-let frameInterval;
-let recognition;
-let isRemoteVideoConnected = false;
+// State
+let socket, localStream, peerConnection, roomId;
+let isCameraOn = true, isMicOn = true;
+let isConnected = false, isRemoteVideoConnected = false;
+let frameInterval, recognition;
+let unreadCount = 0;
+let historyCount = 0;
 
-// Initialize the app
+// ── Init ──────────────────────────────────────────────
 function init() {
-    // Connect to the server using Socket.IO
     socket = io();
-    
-    // Setup socket event listeners
     setupSocketEvents();
-    
-    // Setup UI event listeners
     setupUIEvents();
-    
-    // Setup speech recognition if available
     setupSpeechRecognition();
 }
 
-// Setup Socket.IO event listeners
+// ── Socket Events ─────────────────────────────────────
 function setupSocketEvents() {
-    socket.on('connect', () => {
-        console.log('Connected to server');
-    });
-    
+    socket.on('connect', () => showToast('Connected to server', 'success'));
+
     socket.on('disconnect', () => {
-        console.log('Disconnected from server');
+        showToast('Disconnected from server', 'error');
         handleDisconnect();
     });
-    
-    socket.on('room_created', (data) => {
-        handleRoomCreated(data.room_id);
-    });
-    
+
+    socket.on('room_created', (data) => handleRoomCreated(data.room_id));
+
     socket.on('room_joined', (data) => {
         if (data.success) {
             handleRoomJoined(data.room_id);
         } else {
-            alert(`Failed to join room: ${data.message}`);
+            showToast(`Failed to join: ${data.message}`, 'error');
             hideConnectionStatus();
         }
     });
-    
-    socket.on('user_joined', (data) => {
-        console.log(`User joined: ${data.sid}`);
-        // Start call when a new user joins
+
+    socket.on('user_joined', () => {
+        showToast('A user joined the room', 'success');
         startCall();
     });
-    
-    socket.on('user_left', (data) => {
-        console.log(`User left: ${data.sid}`);
+
+    socket.on('user_left', () => {
+        showToast('The other user left the room', 'warning');
         handlePeerDisconnect();
     });
-    
+
     socket.on('video_frame', (data) => {
-        // Display the processed video frame from the remote user
         if (!isRemoteVideoConnected) {
-            let img = new Image();
+            const img = new Image();
             img.onload = () => {
-                // Only update if remote video is still active and WebRTC stream isn't connected
                 if (!isRemoteVideoConnected) {
                     remoteVideo.style.backgroundImage = `url(${data.frame})`;
                     remoteVideo.style.backgroundSize = 'cover';
                     remoteVideo.style.backgroundPosition = 'center';
                 }
-                
-                // Display detected sign if available - only show the sign in the blue box
-                if (data.detected_sign) {
-                    remoteSignText.textContent = data.detected_sign;
-                    remoteSignText.classList.remove('hidden');
-                } else {
-                    remoteSignText.classList.add('hidden');
-                }
+                updateSignText(remoteSignText, data.detected_sign);
             };
             img.src = data.frame;
         } else {
-            // Just update the sign text if WebRTC stream is already connected
-            if (data.detected_sign) {
-                remoteSignText.textContent = data.detected_sign;
-                remoteSignText.classList.remove('hidden');
-            } else {
-                remoteSignText.classList.add('hidden');
-            }
+            updateSignText(remoteSignText, data.detected_sign);
+        }
+
+        if (data.detected_sign) {
+            addToHistory(data.detected_sign, data.confidence, 'remote');
         }
     });
-    
-    socket.on('speech_to_sign_result', (data) => {
-        displaySpeechToSignResult(data);
-    });
-    
-    // Handle sign detection for local video
+
     socket.on('sign_detected', (data) => {
-        if (data.sign) {
-            localSignText.textContent = data.sign;
-            localSignText.classList.remove('hidden');
-        } else {
-            localSignText.classList.add('hidden');
+        updateSignText(localSignText, data.sign);
+        if (data.sign) addToHistory(data.sign, data.confidence, 'you');
+    });
+
+    socket.on('speech_to_sign_result', (data) => displaySpeechToSignResult(data));
+
+    socket.on('chat_message', (data) => {
+        appendChatMessage(data.message, 'received', data.time);
+        if (document.hidden) {
+            unreadCount++;
+            unreadBadge.textContent = unreadCount;
+            unreadBadge.classList.remove('hidden');
         }
     });
 }
 
-// Setup UI event listeners
+// ── UI Events ─────────────────────────────────────────
 function setupUIEvents() {
     createRoomBtn.addEventListener('click', createRoom);
     joinRoomBtn.addEventListener('click', joinRoom);
+    copyRoomBtn.addEventListener('click', copyRoomId);
     toggleVideoBtn.addEventListener('click', toggleVideo);
     toggleMicBtn.addEventListener('click', toggleMic);
     leaveBtn.addEventListener('click', leaveRoom);
     startSpeechBtn.addEventListener('click', startSpeechRecognition);
     convertBtn.addEventListener('click', convertSpeechToSign);
+    sendChatBtn.addEventListener('click', sendChatMessage);
+    clearHistoryBtn.addEventListener('click', clearHistory);
+
+    chatInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') sendChatMessage();
+    });
+
+    roomIdInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') joinRoom();
+    });
+
+    // Clear unread when user focuses chat
+    chatMessages.addEventListener('click', () => {
+        unreadCount = 0;
+        unreadBadge.classList.add('hidden');
+    });
 }
 
-// Handle room creation
+// ── Room Actions ──────────────────────────────────────
 function createRoom() {
     showConnectionStatus();
     socket.emit('create_room');
 }
 
-// Handle joining a room
 function joinRoom() {
-    const roomIdToJoin = roomIdInput.value.trim();
-    if (roomIdToJoin) {
+    const id = roomIdInput.value.trim();
+    if (id) {
         showConnectionStatus();
-        socket.emit('join_room', { room_id: roomIdToJoin });
+        socket.emit('join_room', { room_id: id });
     } else {
-        alert('Please enter a room ID');
+        showToast('Please enter a Room ID', 'warning');
     }
 }
 
-// Handle successful room creation
 function handleRoomCreated(newRoomId) {
     roomId = newRoomId;
     roomIdDisplay.textContent = roomId;
     startLocalStream();
+    showToast(`Room ${roomId} created! Share the ID`, 'success');
 }
 
-// Handle successful room joining
 function handleRoomJoined(joinedRoomId) {
     roomId = joinedRoomId;
     roomIdDisplay.textContent = roomId;
     startLocalStream();
+    showToast(`Joined room ${roomId}`, 'success');
 }
 
-// Start local video stream
+function copyRoomId() {
+    navigator.clipboard.writeText(roomId).then(() => {
+        showToast('Room ID copied to clipboard!', 'success');
+    });
+}
+
+// ── Media ─────────────────────────────────────────────
 async function startLocalStream() {
     try {
-        localStream = await navigator.mediaDevices.getUserMedia({ 
-            video: true, 
-            audio: true 
-        });
-        
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         localVideo.srcObject = localStream;
-        
         hideConnectionStatus();
         hideJoinUI();
         showCallUI();
-        
-        // Start sending video frames for processing
         startSendingVideoFrames();
-        
-    } catch (error) {
-        console.error('Error accessing media devices:', error);
-        alert('Could not access camera or microphone. Please check permissions.');
+    } catch (err) {
+        showToast('Could not access camera/microphone', 'error');
         hideConnectionStatus();
     }
 }
 
-// Start a WebRTC call
+function toggleVideo() {
+    isCameraOn = !isCameraOn;
+    localStream.getVideoTracks().forEach(t => t.enabled = isCameraOn);
+    toggleVideoBtn.innerHTML = isCameraOn
+        ? '<i class="fas fa-video"></i>'
+        : '<i class="fas fa-video-slash"></i>';
+    toggleVideoBtn.classList.toggle('off', !isCameraOn);
+    if (!isCameraOn) localSignText.classList.add('hidden');
+}
+
+function toggleMic() {
+    isMicOn = !isMicOn;
+    localStream.getAudioTracks().forEach(t => t.enabled = isMicOn);
+    toggleMicBtn.innerHTML = isMicOn
+        ? '<i class="fas fa-microphone"></i>'
+        : '<i class="fas fa-microphone-slash"></i>';
+    toggleMicBtn.classList.toggle('off', !isMicOn);
+}
+
+// ── WebRTC ────────────────────────────────────────────
 function startCall() {
     createPeerConnection();
-    
-    // Add all local tracks to the peer connection
-    localStream.getTracks().forEach(track => {
-        peerConnection.addTrack(track, localStream);
-    });
-    
-    // Create and send an offer
+    localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
     createAndSendOffer();
 }
 
-// Create a WebRTC peer connection
 function createPeerConnection() {
     peerConnection = new RTCPeerConnection(servers);
-    
-    // Handle ICE candidates
-    peerConnection.onicecandidate = (event) => {
-        if (event.candidate) {
-            socket.emit('ice_candidate', {
-                candidate: event.candidate.toJSON(),
-                room_id: roomId
-            });
-        }
+
+    peerConnection.onicecandidate = (e) => {
+        if (e.candidate) socket.emit('ice_candidate', { candidate: e.candidate.toJSON(), room_id: roomId });
     };
-    
-    // Handle connection state changes
+
     peerConnection.onconnectionstatechange = () => {
         if (peerConnection.connectionState === 'connected') {
-            console.log('Peers connected');
             isConnected = true;
+            showToast('Peer-to-peer connection established', 'success');
         }
     };
-    
-    // Handle incoming tracks
-    peerConnection.ontrack = (event) => {
-        if (remoteVideo.srcObject !== event.streams[0]) {
-            console.log('Received remote stream via WebRTC');
-            remoteVideo.srcObject = event.streams[0];
+
+    peerConnection.ontrack = (e) => {
+        if (remoteVideo.srcObject !== e.streams[0]) {
+            remoteVideo.srcObject = e.streams[0];
             isRemoteVideoConnected = true;
         }
     };
-    
-    // Handle ICE connection state changes
+
     peerConnection.oniceconnectionstatechange = () => {
-        console.log('ICE state:', peerConnection.iceConnectionState);
-        if (peerConnection.iceConnectionState === 'disconnected' || 
-            peerConnection.iceConnectionState === 'failed' || 
-            peerConnection.iceConnectionState === 'closed') {
-            handlePeerDisconnect();
-        }
+        const s = peerConnection.iceConnectionState;
+        if (s === 'disconnected' || s === 'failed' || s === 'closed') handlePeerDisconnect();
     };
-    
-    // Listen for ICE candidates from the server
+
     socket.on('ice_candidate', (data) => {
-        const candidate = new RTCIceCandidate(data.candidate);
-        peerConnection.addIceCandidate(candidate)
-            .catch(e => console.error('Error adding ICE candidate:', e));
+        peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate))
+            .catch(e => console.error('ICE error:', e));
     });
-    
-    // Handle offer and answer
+
     socket.on('offer', async (data) => {
         if (!peerConnection) createPeerConnection();
-        
         await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
-        
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
-        
-        socket.emit('answer', {
-            answer: answer,
-            room_id: roomId
-        });
+        socket.emit('answer', { answer, room_id: roomId });
     });
-    
+
     socket.on('answer', async (data) => {
         await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer))
-            .catch(e => console.error('Error setting remote description:', e));
+            .catch(e => console.error('Answer error:', e));
     });
 }
 
-// Create and send an offer to the peer
 async function createAndSendOffer() {
     const offer = await peerConnection.createOffer();
     await peerConnection.setLocalDescription(offer);
-    
-    socket.emit('offer', {
-        offer: offer,
-        room_id: roomId
-    });
+    socket.emit('offer', { offer, room_id: roomId });
 }
 
-// Start sending video frames to the server for sign language detection
+// ── Video Frame Sending ───────────────────────────────
 function startSendingVideoFrames() {
-    // Create a canvas to capture video frames
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
-    
-    // Set canvas size to match video
     canvas.width = 640;
     canvas.height = 480;
-    
-    // Send frames every 200ms for more responsive detection
+
     frameInterval = setInterval(() => {
-        if (localStream && isCameraOn) {
-            try {
-                // Make sure video is properly initialized before using it
-                if (localVideo.videoWidth > 0 && localVideo.videoHeight > 0) {
-                    ctx.drawImage(localVideo, 0, 0, canvas.width, canvas.height);
-                    const frameData = canvas.toDataURL('image/jpeg', 0.7);
-                    
-                    // Send the frame to the server
-                    socket.emit('video_frame', { frame: frameData });
-                }
-            } catch (error) {
-                console.error('Error capturing video frame:', error);
-            }
+        if (localStream && isCameraOn && localVideo.videoWidth > 0) {
+            ctx.drawImage(localVideo, 0, 0, canvas.width, canvas.height);
+            socket.emit('video_frame', { frame: canvas.toDataURL('image/jpeg', 0.7) });
         }
     }, 200);
 }
 
-// Toggle video on/off
-function toggleVideo() {
-    isCameraOn = !isCameraOn;
-    
-    localStream.getVideoTracks().forEach(track => {
-        track.enabled = isCameraOn;
-    });
-    
-    // Update UI
-    toggleVideoBtn.innerHTML = isCameraOn ? 
-        '<i class="fas fa-video"></i>' : 
-        '<i class="fas fa-video-slash"></i>';
-    
-    // Hide sign text when video is off
-    if (!isCameraOn) {
-        localSignText.classList.add('hidden');
+// ── Chat ──────────────────────────────────────────────
+function sendChatMessage() {
+    const msg = chatInput.value.trim();
+    if (!msg) return;
+    const time = getCurrentTime();
+    socket.emit('chat_message', { message: msg, room_id: roomId, time });
+    appendChatMessage(msg, 'sent', time);
+    chatInput.value = '';
+}
+
+function appendChatMessage(message, type, time) {
+    const isEmpty = chatMessages.querySelector('.empty-state');
+    if (isEmpty) isEmpty.remove();
+
+    const div = document.createElement('div');
+    div.className = `chat-msg ${type}`;
+    div.innerHTML = `${escapeHtml(message)}<div class="msg-meta">${time}</div>`;
+    chatMessages.appendChild(div);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+// ── Sign History ──────────────────────────────────────
+function addToHistory(sign, confidence, source) {
+    const isEmpty = signHistory.querySelector('.empty-state');
+    if (isEmpty) isEmpty.remove();
+
+    // Avoid duplicate consecutive entries
+    const last = signHistory.querySelector('.history-item:last-child .sign-name');
+    if (last && last.textContent === String(sign)) return;
+
+    historyCount++;
+    if (historyCount > 50) {
+        signHistory.querySelector('.history-item')?.remove();
+        historyCount--;
     }
+
+    const pct = confidence != null ? Math.round(confidence * 100) : null;
+    const item = document.createElement('div');
+    item.className = 'history-item';
+    item.innerHTML = `
+        <span class="sign-name">${escapeHtml(String(sign))}</span>
+        ${pct != null ? `
+        <div class="confidence-bar-wrap">
+            <div class="confidence-bar" style="width:${pct}%"></div>
+        </div>
+        <span class="confidence-label">${pct}%</span>` : ''}
+        <span class="sign-source ${source === 'remote' ? 'remote' : ''}">${source}</span>
+        <span class="sign-time">${getCurrentTime()}</span>
+    `;
+    signHistory.appendChild(item);
+    signHistory.scrollTop = signHistory.scrollHeight;
 }
 
-// Toggle microphone on/off
-function toggleMic() {
-    isMicOn = !isMicOn;
-    
-    localStream.getAudioTracks().forEach(track => {
-        track.enabled = isMicOn;
-    });
-    
-    // Update UI
-    toggleMicBtn.innerHTML = isMicOn ? 
-        '<i class="fas fa-microphone"></i>' : 
-        '<i class="fas fa-microphone-slash"></i>';
+function clearHistory() {
+    signHistory.innerHTML = '<p class="empty-state">No signs detected yet...</p>';
+    historyCount = 0;
 }
 
-// Leave the current room
-function leaveRoom() {
-    // Stop sending frames
-    clearInterval(frameInterval);
-    
-    // Close peer connection
-    if (peerConnection) {
-        peerConnection.close();
-        peerConnection = null;
-    }
-    
-    // Stop local media tracks
-    if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
-        localStream = null;
-    }
-    
-    // Reset video elements
-    localVideo.srcObject = null;
-    remoteVideo.srcObject = null;
-    remoteVideo.style.backgroundImage = '';
-    
-    // Reset UI
-    showJoinUI();
-    hideCallUI();
-    
-    // Reset variables
-    roomId = null;
-    isConnected = false;
-    isRemoteVideoConnected = false;
-    
-    // Reload the page for a fresh start
-    window.location.reload();
-}
-
-// Handle peer disconnect
-function handlePeerDisconnect() {
-    remoteVideo.srcObject = null;
-    remoteSignText.classList.add('hidden');
-    
-    if (peerConnection) {
-        peerConnection.close();
-        peerConnection = null;
-    }
-    
-    isConnected = false;
-    isRemoteVideoConnected = false;
-}
-
-// Handle server disconnect
-function handleDisconnect() {
-    alert('Disconnected from server. Please refresh the page.');
-    leaveRoom();
-}
-
-// Setup speech recognition
+// ── Speech to Sign ────────────────────────────────────
 function setupSpeechRecognition() {
     if ('webkitSpeechRecognition' in window) {
         recognition = new webkitSpeechRecognition();
         recognition.continuous = false;
         recognition.interimResults = false;
         recognition.lang = 'en-US';
-        
-        recognition.onresult = (event) => {
-            const transcript = event.results[0][0].transcript;
-            speechText.value = transcript;
-        };
-        
-        recognition.onerror = (event) => {
-            console.error('Speech recognition error:', event.error);
-            startSpeechBtn.disabled = false;
-        };
-        
-        recognition.onend = () => {
-            startSpeechBtn.disabled = false;
-        };
+        recognition.onresult = (e) => { speechText.value = e.results[0][0].transcript; };
+        recognition.onerror = () => { startSpeechBtn.disabled = false; };
+        recognition.onend = () => { startSpeechBtn.disabled = false; };
     } else {
         startSpeechBtn.style.display = 'none';
-        console.warn('Speech recognition not supported in this browser');
     }
 }
 
-// Start speech recognition
 function startSpeechRecognition() {
     if (recognition) {
         speechText.value = '';
@@ -447,41 +369,24 @@ function startSpeechRecognition() {
     }
 }
 
-// Convert speech to sign language
 function convertSpeechToSign() {
     const text = speechText.value.trim();
     if (text) {
-        socket.emit('speech_to_sign', { text: text });
+        socket.emit('speech_to_sign', { text });
     } else {
-        alert('Please enter or speak some text to convert');
+        showToast('Please enter or speak some text', 'warning');
     }
 }
 
-// Display speech to sign language results
 function displaySpeechToSignResult(data) {
-    const text = data.text;
-    const imagePaths = data.images;
-    const wordInfo = data.word_info || [];
-    
-    // Clear previous images
     signImagesContainer.innerHTML = '';
-    
-    // If no images were found
-    if (imagePaths.length === 0) {
-        const noImagesMsg = document.createElement('p');
-        noImagesMsg.textContent = 'No sign language images available for this text.';
-        signImagesContainer.appendChild(noImagesMsg);
+    if (!data.images.length) {
+        signImagesContainer.innerHTML = '<p style="color:var(--text-secondary);font-size:13px">No sign images found for this text.</p>';
         return;
     }
-    
-    // Add images with proper word spacing
     let currentWord = '';
-    
-    for (let i = 0; i < imagePaths.length; i++) {
-        const path = imagePaths[i];
-        const info = wordInfo[i] || {};
-        
-        // Add spacer between words
+    data.images.forEach((path, i) => {
+        const info = data.word_info[i] || {};
         if (info.type === 'word' || (info.type === 'character' && info.word !== currentWord)) {
             if (currentWord !== '') {
                 const spacer = document.createElement('div');
@@ -490,40 +395,80 @@ function displaySpeechToSignResult(data) {
             }
             currentWord = info.word;
         }
-        
-        // Create and add the image
         const img = document.createElement('img');
         img.src = path;
         img.alt = info.type === 'character' ? info.character : info.word;
-        img.classList.add('sign-image');
+        img.className = 'sign-image';
         signImagesContainer.appendChild(img);
+    });
+}
+
+// ── Toast Notifications ───────────────────────────────
+function showToast(message, type = 'info') {
+    const icons = { success: 'fa-check-circle', error: 'fa-times-circle', warning: 'fa-exclamation-triangle', info: 'fa-info-circle' };
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.innerHTML = `<i class="fas ${icons[type] || icons.info}"></i> ${escapeHtml(message)}`;
+    document.getElementById('toast-container').appendChild(toast);
+    setTimeout(() => {
+        toast.classList.add('removing');
+        setTimeout(() => toast.remove(), 300);
+    }, 3500);
+}
+
+// ── Helpers ───────────────────────────────────────────
+function updateSignText(el, sign) {
+    if (sign) {
+        el.textContent = sign;
+        el.classList.remove('hidden');
+    } else {
+        el.classList.add('hidden');
     }
 }
 
-// Show/hide UI elements
-function showJoinUI() {
-    joinContainer.classList.remove('hidden');
+function getCurrentTime() {
+    return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function hideJoinUI() {
-    joinContainer.classList.add('hidden');
+function escapeHtml(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-function showCallUI() {
-    callContainer.classList.remove('hidden');
+// ── Disconnect / Leave ────────────────────────────────
+function leaveRoom() {
+    clearInterval(frameInterval);
+    if (peerConnection) { peerConnection.close(); peerConnection = null; }
+    if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+    localVideo.srcObject = null;
+    remoteVideo.srcObject = null;
+    remoteVideo.style.backgroundImage = '';
+    showJoinUI();
+    hideCallUI();
+    roomId = null;
+    isConnected = false;
+    isRemoteVideoConnected = false;
+    window.location.reload();
 }
 
-function hideCallUI() {
-    callContainer.classList.add('hidden');
+function handlePeerDisconnect() {
+    remoteVideo.srcObject = null;
+    remoteSignText.classList.add('hidden');
+    if (peerConnection) { peerConnection.close(); peerConnection = null; }
+    isConnected = false;
+    isRemoteVideoConnected = false;
 }
 
-function showConnectionStatus() {
-    connectionStatus.classList.remove('hidden');
+function handleDisconnect() {
+    showToast('Disconnected from server. Please refresh.', 'error');
+    leaveRoom();
 }
 
-function hideConnectionStatus() {
-    connectionStatus.classList.add('hidden');
-}
+// ── Show/Hide UI ──────────────────────────────────────
+function showJoinUI()          { joinContainer.classList.remove('hidden'); }
+function hideJoinUI()          { joinContainer.classList.add('hidden'); }
+function showCallUI()          { callContainer.classList.remove('hidden'); }
+function hideCallUI()          { callContainer.classList.add('hidden'); }
+function showConnectionStatus(){ connectionStatus.classList.remove('hidden'); }
+function hideConnectionStatus(){ connectionStatus.classList.add('hidden'); }
 
-// Initialize the app when the page loads
-window.addEventListener('load', init); 
+window.addEventListener('load', init);
