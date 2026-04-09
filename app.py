@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Initialize Flask app and SocketIO
 app = Flask(__name__, static_folder='static')
 app.config['SECRET_KEY'] = 'signlanguage123'
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=60, ping_interval=25)
 
 # Store active rooms and users
 active_rooms = {}
@@ -82,6 +82,10 @@ def handle_disconnect():
                 emit('user_left', {'sid': request.sid}, room=room_id)
     if request.sid in connected_users:
         del connected_users[request.sid]
+
+@socketio.on('ping_keepalive')
+def handle_ping():
+    emit('pong_keepalive')
 
 @socketio.on('create_room')
 def handle_create_room():
@@ -193,9 +197,7 @@ def handle_chat_message(data):
     room_id = connected_users.get(request.sid, {}).get('room')
     if not room_id:
         return
-    for user_sid in active_rooms.get(room_id, []):
-        if user_sid != request.sid:
-            emit('chat_message', {'message': data['message'], 'time': data.get('time', '')}, room=user_sid)
+    emit('chat_message', {'message': data['message'], 'time': data.get('time', '')}, room=room_id, skip_sid=request.sid)
 
 @socketio.on('speech_to_sign')
 def handle_speech_to_sign(data):

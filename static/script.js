@@ -25,11 +25,13 @@ const signHistory         = document.getElementById('sign-history');
 const clearHistoryBtn     = document.getElementById('clear-history-btn');
 const unreadBadge         = document.getElementById('unread-badge');
 
-// WebRTC config
+// WebRTC config with more STUN/TURN servers for better connectivity
 const servers = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' }
     ]
 };
 
@@ -37,13 +39,18 @@ const servers = {
 let socket, localStream, peerConnection, roomId;
 let isCameraOn = true, isMicOn = true;
 let isConnected = false, isRemoteVideoConnected = false;
-let frameInterval, recognition;
-let unreadCount = 0;
-let historyCount = 0;
+let frameInterval, pingInterval, recognition;
+let unreadCount = 0, historyCount = 0;
 
 // ── Init ──────────────────────────────────────────────
 function init() {
-    socket = io();
+    // FIX 1: reconnection options to handle Render's idle disconnects
+    socket = io({
+        reconnection: true,
+        reconnectionAttempts: 10,
+        reconnectionDelay: 2000,
+        timeout: 60000
+    });
     setupSocketEvents();
     setupUIEvents();
     setupSpeechRecognition();
@@ -51,11 +58,23 @@ function init() {
 
 // ── Socket Events ─────────────────────────────────────
 function setupSocketEvents() {
-    socket.on('connect', () => showToast('Connected to server', 'success'));
+    socket.on('connect', () => {
+        showToast('Connected to server', 'success');
+        // FIX 1: start keepalive ping every 20s to prevent Render from closing idle connection
+        clearInterval(pingInterval);
+        pingInterval = setInterval(() => socket.emit('ping_keepalive'), 20000);
+    });
 
-    socket.on('disconnect', () => {
-        showToast('Disconnected from server', 'error');
-        handleDisconnect();
+    socket.on('disconnect', (reason) => {
+        clearInterval(pingInterval);
+        // FIX 1: only show error for non-intentional disconnects, auto-reconnect handles the rest
+        if (reason !== 'io client disconnect') {
+            showToast('Connection lost. Reconnecting...', 'warning');
+        }
+    });
+
+    socket.on('reconnect', () => {
+        showToast('Reconnected to server', 'success');
     });
 
     socket.on('room_created', (data) => handleRoomCreated(data.room_id));
@@ -79,25 +98,38 @@ function setupSocketEvents() {
         handlePeerDisconnect();
     });
 
+    // FIX 5: WebRTC signaling listeners moved here (outside createPeerConnection)
+    // so they are registered only ONCE and never duplicated
+    socket.on('ice_candidate', (data) => {
+        if (peerConnection && data.candidate) {
+            peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate))
+                .catch(e => console.error('ICE error:', e));
+        }
+    });
+
+    socket.on('offer', async (data) => {
+        if (!peerConnection) createPeerConnection();
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        socket.emit('answer', { answer, room_id: roomId });
+    });
+
+    socket.on('answer', async (data) => {
+        if (peerConnection) {
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer))
+                .catch(e => console.error('Answer error:', e));
+        }
+    });
+
     socket.on('video_frame', (data) => {
         if (!isRemoteVideoConnected) {
-            const img = new Image();
-            img.onload = () => {
-                if (!isRemoteVideoConnected) {
-                    remoteVideo.style.backgroundImage = `url(${data.frame})`;
-                    remoteVideo.style.backgroundSize = 'cover';
-                    remoteVideo.style.backgroundPosition = 'center';
-                }
-                updateSignText(remoteSignText, data.detected_sign);
-            };
-            img.src = data.frame;
-        } else {
-            updateSignText(remoteSignText, data.detected_sign);
+            remoteVideo.style.backgroundImage = `url(${data.frame})`;
+            remoteVideo.style.backgroundSize = 'cover';
+            remoteVideo.style.backgroundPosition = 'center';
         }
-
-        if (data.detected_sign) {
-            addToHistory(data.detected_sign, data.confidence, 'remote');
-        }
+        updateSignText(remoteSignText, data.detected_sign);
+        if (data.detected_sign) addToHistory(data.detected_sign, data.confidence, 'remote');
     });
 
     socket.on('sign_detected', (data) => {
@@ -105,15 +137,15 @@ function setupSocketEvents() {
         if (data.sign) addToHistory(data.sign, data.confidence, 'you');
     });
 
+    // FIX 4: speech_to_sign_result now comes back fast since server just looks up images
     socket.on('speech_to_sign_result', (data) => displaySpeechToSignResult(data));
 
+    // FIX 5: chat now works — server broadcasts to room, we receive here
     socket.on('chat_message', (data) => {
         appendChatMessage(data.message, 'received', data.time);
-        if (document.hidden) {
-            unreadCount++;
-            unreadBadge.textContent = unreadCount;
-            unreadBadge.classList.remove('hidden');
-        }
+        unreadCount++;
+        unreadBadge.textContent = unreadCount;
+        unreadBadge.classList.remove('hidden');
     });
 }
 
@@ -130,15 +162,9 @@ function setupUIEvents() {
     sendChatBtn.addEventListener('click', sendChatMessage);
     clearHistoryBtn.addEventListener('click', clearHistory);
 
-    chatInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') sendChatMessage();
-    });
+    chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChatMessage(); });
+    roomIdInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') joinRoom(); });
 
-    roomIdInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') joinRoom();
-    });
-
-    // Clear unread when user focuses chat
     chatMessages.addEventListener('click', () => {
         unreadCount = 0;
         unreadBadge.classList.add('hidden');
@@ -176,15 +202,17 @@ function handleRoomJoined(joinedRoomId) {
 }
 
 function copyRoomId() {
-    navigator.clipboard.writeText(roomId).then(() => {
-        showToast('Room ID copied to clipboard!', 'success');
-    });
+    navigator.clipboard.writeText(roomId).then(() => showToast('Room ID copied!', 'success'));
 }
 
 // ── Media ─────────────────────────────────────────────
 async function startLocalStream() {
     try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        // FIX 3: request audio explicitly with constraints for better quality
+        localStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15 } },
+            audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 44100 }
+        });
         localVideo.srcObject = localStream;
         hideConnectionStatus();
         hideJoinUI();
@@ -199,9 +227,7 @@ async function startLocalStream() {
 function toggleVideo() {
     isCameraOn = !isCameraOn;
     localStream.getVideoTracks().forEach(t => t.enabled = isCameraOn);
-    toggleVideoBtn.innerHTML = isCameraOn
-        ? '<i class="fas fa-video"></i>'
-        : '<i class="fas fa-video-slash"></i>';
+    toggleVideoBtn.innerHTML = isCameraOn ? '<i class="fas fa-video"></i>' : '<i class="fas fa-video-slash"></i>';
     toggleVideoBtn.classList.toggle('off', !isCameraOn);
     if (!isCameraOn) localSignText.classList.add('hidden');
 }
@@ -209,20 +235,20 @@ function toggleVideo() {
 function toggleMic() {
     isMicOn = !isMicOn;
     localStream.getAudioTracks().forEach(t => t.enabled = isMicOn);
-    toggleMicBtn.innerHTML = isMicOn
-        ? '<i class="fas fa-microphone"></i>'
-        : '<i class="fas fa-microphone-slash"></i>';
+    toggleMicBtn.innerHTML = isMicOn ? '<i class="fas fa-microphone"></i>' : '<i class="fas fa-microphone-slash"></i>';
     toggleMicBtn.classList.toggle('off', !isMicOn);
 }
 
 // ── WebRTC ────────────────────────────────────────────
 function startCall() {
     createPeerConnection();
+    // FIX 3: add ALL tracks (video + audio) before creating offer
     localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
     createAndSendOffer();
 }
 
 function createPeerConnection() {
+    if (peerConnection) { peerConnection.close(); }
     peerConnection = new RTCPeerConnection(servers);
 
     peerConnection.onicecandidate = (e) => {
@@ -230,45 +256,30 @@ function createPeerConnection() {
     };
 
     peerConnection.onconnectionstatechange = () => {
-        if (peerConnection.connectionState === 'connected') {
+        const state = peerConnection.connectionState;
+        if (state === 'connected') {
             isConnected = true;
-            showToast('Peer-to-peer connection established', 'success');
+            showToast('Video call connected!', 'success');
+        } else if (state === 'failed') {
+            showToast('Connection failed. Try rejoining.', 'error');
         }
     };
 
+    // FIX 3: ontrack receives remote audio+video stream
     peerConnection.ontrack = (e) => {
         if (remoteVideo.srcObject !== e.streams[0]) {
             remoteVideo.srcObject = e.streams[0];
             isRemoteVideoConnected = true;
+            remoteVideo.style.backgroundImage = '';
         }
     };
-
-    peerConnection.oniceconnectionstatechange = () => {
-        const s = peerConnection.iceConnectionState;
-        if (s === 'disconnected' || s === 'failed' || s === 'closed') handlePeerDisconnect();
-    };
-
-    socket.on('ice_candidate', (data) => {
-        peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate))
-            .catch(e => console.error('ICE error:', e));
-    });
-
-    socket.on('offer', async (data) => {
-        if (!peerConnection) createPeerConnection();
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
-        const answer = await peerConnection.createAnswer();
-        await peerConnection.setLocalDescription(answer);
-        socket.emit('answer', { answer, room_id: roomId });
-    });
-
-    socket.on('answer', async (data) => {
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer))
-            .catch(e => console.error('Answer error:', e));
-    });
 }
 
 async function createAndSendOffer() {
-    const offer = await peerConnection.createOffer();
+    const offer = await peerConnection.createOffer({
+        offerToReceiveAudio: true,   // FIX 3: explicitly request audio
+        offerToReceiveVideo: true
+    });
     await peerConnection.setLocalDescription(offer);
     socket.emit('offer', { offer, room_id: roomId });
 }
@@ -277,31 +288,36 @@ async function createAndSendOffer() {
 function startSendingVideoFrames() {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
-    canvas.width = 640;
-    canvas.height = 480;
+    // FIX 2: reduce frame size from 640x480 to 320x240 to reduce lag
+    canvas.width = 320;
+    canvas.height = 240;
 
+    // FIX 2: send every 500ms instead of 200ms — only for sign detection, not video
     frameInterval = setInterval(() => {
         if (localStream && isCameraOn && localVideo.videoWidth > 0) {
             ctx.drawImage(localVideo, 0, 0, canvas.width, canvas.height);
-            socket.emit('video_frame', { frame: canvas.toDataURL('image/jpeg', 0.7) });
+            // FIX 2: lower jpeg quality to 0.5 to reduce payload size
+            socket.emit('video_frame', { frame: canvas.toDataURL('image/jpeg', 0.5) });
         }
-    }, 200);
+    }, 500);
 }
 
 // ── Chat ──────────────────────────────────────────────
 function sendChatMessage() {
     const msg = chatInput.value.trim();
     if (!msg) return;
+    if (!roomId) { showToast('Join a room first', 'warning'); return; }
     const time = getCurrentTime();
+    // FIX 5: emit to server which broadcasts to room
     socket.emit('chat_message', { message: msg, room_id: roomId, time });
+    // show immediately on sender side
     appendChatMessage(msg, 'sent', time);
     chatInput.value = '';
 }
 
 function appendChatMessage(message, type, time) {
-    const isEmpty = chatMessages.querySelector('.empty-state');
-    if (isEmpty) isEmpty.remove();
-
+    const empty = chatMessages.querySelector('.empty-state');
+    if (empty) empty.remove();
     const div = document.createElement('div');
     div.className = `chat-msg ${type}`;
     div.innerHTML = `${escapeHtml(message)}<div class="msg-meta">${time}</div>`;
@@ -311,29 +327,21 @@ function appendChatMessage(message, type, time) {
 
 // ── Sign History ──────────────────────────────────────
 function addToHistory(sign, confidence, source) {
-    const isEmpty = signHistory.querySelector('.empty-state');
-    if (isEmpty) isEmpty.remove();
+    const empty = signHistory.querySelector('.empty-state');
+    if (empty) empty.remove();
 
-    // Avoid duplicate consecutive entries
     const last = signHistory.querySelector('.history-item:last-child .sign-name');
     if (last && last.textContent === String(sign)) return;
 
     historyCount++;
-    if (historyCount > 50) {
-        signHistory.querySelector('.history-item')?.remove();
-        historyCount--;
-    }
+    if (historyCount > 50) { signHistory.querySelector('.history-item')?.remove(); historyCount--; }
 
     const pct = confidence != null ? Math.round(confidence * 100) : null;
     const item = document.createElement('div');
     item.className = 'history-item';
     item.innerHTML = `
         <span class="sign-name">${escapeHtml(String(sign))}</span>
-        ${pct != null ? `
-        <div class="confidence-bar-wrap">
-            <div class="confidence-bar" style="width:${pct}%"></div>
-        </div>
-        <span class="confidence-label">${pct}%</span>` : ''}
+        ${pct != null ? `<div class="confidence-bar-wrap"><div class="confidence-bar" style="width:${pct}%"></div></div><span class="confidence-label">${pct}%</span>` : ''}
         <span class="sign-source ${source === 'remote' ? 'remote' : ''}">${source}</span>
         <span class="sign-time">${getCurrentTime()}</span>
     `;
@@ -369,6 +377,7 @@ function startSpeechRecognition() {
     }
 }
 
+// FIX 4: convert speech to sign — emit to server which just does image lookup (fast)
 function convertSpeechToSign() {
     const text = speechText.value.trim();
     if (text) {
@@ -381,7 +390,7 @@ function convertSpeechToSign() {
 function displaySpeechToSignResult(data) {
     signImagesContainer.innerHTML = '';
     if (!data.images.length) {
-        signImagesContainer.innerHTML = '<p style="color:var(--text-secondary);font-size:13px">No sign images found for this text.</p>';
+        signImagesContainer.innerHTML = '<p style="color:var(--text-secondary);font-size:13px">No sign images found.</p>';
         return;
     }
     let currentWord = '';
@@ -410,20 +419,13 @@ function showToast(message, type = 'info') {
     toast.className = `toast ${type}`;
     toast.innerHTML = `<i class="fas ${icons[type] || icons.info}"></i> ${escapeHtml(message)}`;
     document.getElementById('toast-container').appendChild(toast);
-    setTimeout(() => {
-        toast.classList.add('removing');
-        setTimeout(() => toast.remove(), 300);
-    }, 3500);
+    setTimeout(() => { toast.classList.add('removing'); setTimeout(() => toast.remove(), 300); }, 3500);
 }
 
 // ── Helpers ───────────────────────────────────────────
 function updateSignText(el, sign) {
-    if (sign) {
-        el.textContent = sign;
-        el.classList.remove('hidden');
-    } else {
-        el.classList.add('hidden');
-    }
+    if (sign) { el.textContent = sign; el.classList.remove('hidden'); }
+    else { el.classList.add('hidden'); }
 }
 
 function getCurrentTime() {
@@ -437,6 +439,7 @@ function escapeHtml(str) {
 // ── Disconnect / Leave ────────────────────────────────
 function leaveRoom() {
     clearInterval(frameInterval);
+    clearInterval(pingInterval);
     if (peerConnection) { peerConnection.close(); peerConnection = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
     localVideo.srcObject = null;
@@ -452,6 +455,7 @@ function leaveRoom() {
 
 function handlePeerDisconnect() {
     remoteVideo.srcObject = null;
+    remoteVideo.style.backgroundImage = '';
     remoteSignText.classList.add('hidden');
     if (peerConnection) { peerConnection.close(); peerConnection = null; }
     isConnected = false;
@@ -460,7 +464,6 @@ function handlePeerDisconnect() {
 
 function handleDisconnect() {
     showToast('Disconnected from server. Please refresh.', 'error');
-    leaveRoom();
 }
 
 // ── Show/Hide UI ──────────────────────────────────────
