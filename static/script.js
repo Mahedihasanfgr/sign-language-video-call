@@ -110,6 +110,13 @@ function setupSocketEvents() {
     socket.on('offer', async (data) => {
         if (!peerConnection) createPeerConnection();
         await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+        // add joiner's tracks so host can hear them
+        if (localStream) {
+            localStream.getTracks().forEach(track => {
+                if (!peerConnection.getSenders().find(s => s.track === track))
+                    peerConnection.addTrack(track, localStream);
+            });
+        }
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
         socket.emit('answer', { answer, room_id: roomId });
@@ -296,10 +303,9 @@ function startSendingVideoFrames() {
     frameInterval = setInterval(() => {
         if (localStream && isCameraOn && localVideo.videoWidth > 0) {
             ctx.drawImage(localVideo, 0, 0, canvas.width, canvas.height);
-            // FIX 2: lower jpeg quality to 0.5 to reduce payload size
-            socket.emit('video_frame', { frame: canvas.toDataURL('image/jpeg', 0.5) });
+            socket.emit('video_frame', { frame: canvas.toDataURL('image/jpeg', 0.4) });
         }
-    }, 500);
+    }, 1000);
 }
 
 // ── Chat ──────────────────────────────────────────────
@@ -362,8 +368,16 @@ function setupSpeechRecognition() {
         recognition.interimResults = false;
         recognition.lang = 'en-US';
         recognition.onresult = (e) => { speechText.value = e.results[0][0].transcript; };
-        recognition.onerror = () => { startSpeechBtn.disabled = false; };
-        recognition.onend = () => { startSpeechBtn.disabled = false; };
+        recognition.onerror = () => {
+            startSpeechBtn.disabled = false;
+            startSpeechBtn.innerHTML = '<i class="fas fa-microphone"></i> Speak';
+            startSpeechBtn.style.background = '';
+        };
+        recognition.onend = () => {
+            startSpeechBtn.disabled = false;
+            startSpeechBtn.innerHTML = '<i class="fas fa-microphone"></i> Speak';
+            startSpeechBtn.style.background = '';
+        };
     } else {
         startSpeechBtn.style.display = 'none';
     }
@@ -373,6 +387,8 @@ function startSpeechRecognition() {
     if (recognition) {
         speechText.value = '';
         startSpeechBtn.disabled = true;
+        startSpeechBtn.innerHTML = '<i class="fas fa-circle"></i> Listening...';
+        startSpeechBtn.style.background = '#e74c3c';
         recognition.start();
     }
 }
