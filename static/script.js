@@ -133,11 +133,6 @@ function setupSocketEvents() {
     });
 
     socket.on('video_frame', (data) => {
-        if (!isRemoteVideoConnected) {
-            remoteVideo.style.backgroundImage = `url(${data.frame})`;
-            remoteVideo.style.backgroundSize = 'cover';
-            remoteVideo.style.backgroundPosition = 'center';
-        }
         updateSignText(remoteSignText, data.detected_sign);
         if (data.detected_sign) addToHistory(data.detected_sign, data.confidence, 'remote');
     });
